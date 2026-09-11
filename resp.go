@@ -7,6 +7,8 @@ import (
     "strconv"
 )
 
+// Reader
+
 const (
     STRING = '+'
     ERROR = '-'
@@ -127,12 +129,6 @@ func (r *Resp) readBulk() (Value, error) {
 
     bulk := make([]byte, length)
     
-    // _, err = io.ReadFull(r.reader, bulk)
-    // 
-    // if err != nil {
-    //     return v, err
-    // }
-
     r.reader.Read(bulk) // bufio read
     v.bulk = string(bulk)
 
@@ -140,4 +136,101 @@ func (r *Resp) readBulk() (Value, error) {
     r.readLine()
 
     return v, nil
+}
+
+// Writer
+
+type Writer struct {
+    writer io.Writer
+}
+
+func NewWriter(w io.Writer) *Writer {
+    return &Writer{writer: w}
+}
+
+func (w* Writer) Write(val Value) error {
+    var bytes = val.Marshall()
+    
+    // calls io writer write
+    _, err = w.writer.Write(bytes)
+
+    if err != nil {
+        return err
+    }
+
+    return nil
+}
+
+// Marshall
+
+func (val Value) Marshall() []byte {
+    switch val.typ {
+        case "array":
+            return val.marshallArray()
+        case "bulk":
+            return val.marshallBulk()
+        case "string":
+            return val.marshallString()
+        case "null":
+            return val.marshallNull()
+        case "error":
+            return val.marshallError()
+        default:
+            return []byte{}
+    }
+}
+
+func (val Value) marshallString() []byte {
+    var bytes []byte
+
+    bytes = append(bytes, STRING)
+    bytes = append(bytes, val.str...)
+    bytes = append(bytes, '\r', '\n')
+
+    return bytes
+}
+
+func (val Value) marshallBulk() []byte {
+    var bytes []byte
+
+    bytes = append(bytes, BULK)
+    bytes = append(bytes, strconv.Itoa(len(val.bulk))...)
+    bytes = append(bytes, '\r', '\n')
+    bytes = append(bytes, val.bulk...)
+    bytes = append(bytes, '\r', '\n')
+
+    return bytes
+}
+
+func (val Value) marshallArray() []byte {
+    var bytes []byte
+    length := len(var.array)
+
+    bytes = append(bytes, ARRAY)
+    bytes = append(bytes, strconv.Itoa(length)...)
+    bytes = append(bytes, '\r', '\n')
+
+    for i := 0; i < length; i++ {
+        bytes = append(bytes, val.array[i].Marshal()...)
+    }
+
+    return bytes
+}
+
+func (val Value) marshallError() []byte {
+    var bytes []byte
+   
+    bytes = append(bytes, ERROR)
+    bytes = append(bytes, val.str...)
+    bytes = append(bytes, '\r', '\n')
+    
+    return bytes
+}
+
+func (val Value) marshallNull() []byte {
+    var bytes []byte
+
+    bytes = append(bytes, "$-1\r\n"...)
+
+    return bytes
 }

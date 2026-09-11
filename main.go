@@ -31,21 +31,10 @@ func main() {
             return
         }
 
-        fmt.Println(val)
-
-        // buf := make([]byte, 1024)
-
-        // // read message from client
-        // _, err = conn.Read(buf)
-        // if err != nil {
-        //     if err == io.EOF {
-        //         break
-        //     }
-        //     fmt.Println("Error reading from client: ", err.Error())
-        //     os.Exit(1)
-        // }
-
-        conn.Write([]byte("+OK\r\n"))
+        // fmt.Println(val)
+        
+        writer := NewWriter(conn)
+        writer.Write(Value{typ: "string", str: "OK"}
     }            
 }
 
