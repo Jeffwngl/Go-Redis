@@ -1,236 +1,252 @@
 package main
 
 import (
-    "bufio"
-    "fmt"
-    "io"
-    "strconv"
+	"bufio"
+	"fmt"
+	"io"
+	"strconv"
 )
 
-// reader
+// READER
 
 const (
-    RESPstring = '+'
-    RESPerror = '-'
-    RESPinteger = ':'
-    RESPbulk = '$'
-    RESParray = '*'
+	RESPstring  = '+'
+	RESPerror   = '-'
+	RESPinteger = ':'
+	RESPbulk    = '$'
+	RESParray   = '*'
 )
 
-// struct to hold all commands we recieve from the client
+/*
+This is the internal representation when input is recieved in RESP form
+
+e.g.
+
+$4\r\nfoo\r\n
+
+becomes;
+
+	Value{
+	    typ:  "bulk",
+		bulk: "foo",
+	}
+*/
 type Value struct {
-    typ string
-    str string
-    num int
-    bulk string
-    array []value
+	typ   string
+	str   string
+	num   int
+	bulk  string
+	array []Value
 }
 
-// reader to help use read from the buffer and store in the value struct
-type resp struct {
-    reader *bufio.Reader
-}
-// initialize new resp object
-func NewResp(rd io.Reader) *resp {
-    return &resp{reader: bufio.NewReader(rd)}
+type Resp struct {
+	reader *bufio.Reader
 }
 
-// function to read byte until it reaches \r, return without \r\n
-func (r *resp) readline() (line []byte, n int, err error) {
-    for {
-        b, err := r.reader.readbyte()
-
-        if err != nil {
-            return nil, 0, err
-        }
-        
-        n += 1;
-        line = append(line, b)
-        
-        if len(line) >= 2 && line[len(line) - 2] == '\r' {
-            break
-        }
-    }
-    return line[:len(line) - 2], n, nil    
+func NewResp(rd io.Reader) *Resp {
+	return &Resp{reader: bufio.NewReader(rd)}
 }
 
-// read integer
-func (r *resp) readinteger() (x int, y int, err error) {
-    line, n, err := r.readline()
+// reads byte until it reaches \r, return without \r\n
+func (r *Resp) readline() (line []byte, n int, err error) {
+	for {
+		b, err := r.reader.ReadByte()
 
-    if err != nil {
-        return 0, 0, err
-    }
-    
-    // convert bytes in line into a 64 bits signed integer e.g. "123"
-    // parse it as base 10 (decimal) and as a signed 64 bit integer
-    i64, err := strconv.ParseInt(string(line), 10, 64)
-    
-    if err != nil {
-        return 0, n, err
-    }
+		if err != nil {
+			return nil, 0, err
+		}
 
-    return int(i64), n, nil
+		n += 1
+		line = append(line, b)
+
+		if len(line) >= 2 && line[len(line)-2] == '\r' {
+			break
+		}
+	}
+
+	return line[:len(line)-2], n, nil
 }
 
-func (r *resp) read() (value, error) {
-    _type, err := r.reader.readbyte()
+// read integer to get the size of the following value
+func (r *Resp) readinteger() (x int, y int, err error) {
+	line, n, err := r.readline()
 
-    if err != nil {
-        fmt.println("chere")
-        return value{}, err
-    }
+	if err != nil {
+		return 0, 0, err
+	}
 
-    switch _type {
-        case array:
-            return r.readarray()
-        case bulk:
-            return r.readbulk()
-        default:
-            fmt.printf("unknown type: %v", string(_type))
-            return value{}, nil
-    }
+	// convert bytes in line into a 64 bits signed integer e.g. "123"
+	// parse it as base 10 (decimal) and as a signed 64 bit integer
+	i64, err := strconv.ParseInt(string(line), 10, 64)
+
+	if err != nil {
+		return 0, n, err
+	}
+
+	return int(i64), n, nil
 }
 
-func (r *resp) readarray() (value, error) {
-    v := value{}
-    v.typ = "array"
-    
-    length, _, err := r.readinteger()
+// central dispatcher read command
+// reads first byte to determine the type of the following value
+func (r *Resp) read() (Value, error) {
+	_type, err := r.reader.ReadByte()
 
-    if err != nil {
-        return v, err
-    }
-    
-    v.array = make([]value, 0)
+	if err != nil {
+		return Value{}, err
+	}
 
-    for i := 0; i < length; i++ {
-        val, err := r.read()
-
-        if err != nil {
-            return v, err
-        }
-
-        v.array = append(v.array, val)
-    }
-
-    return v, nil
+	switch _type {
+	case RESParray:
+		return r.readarray()
+	case RESPbulk:
+		return r.readbulk()
+	default:
+		fmt.Printf("unknown type: %v", string(_type))
+		return Value{}, nil
+	}
 }
 
-func (r *resp) readbulk() (value, error) {
-    v := value{}
-    v.typ = "bulk"
+func (r *Resp) readarray() (Value, error) {
+	v := Value{}
+	v.typ = "array"
 
-    length, _, err := r.readinteger()
+	length, _, err := r.readinteger()
 
-    if err != nil {
-        return v, err
-    }
+	if err != nil {
+		return v, err
+	}
 
-    bulk := make([]byte, length)
-    
-	_, err := io.ReadFull(r.reader, bulk)
-    v.bulk = string(bulk)
+	v.array = make([]Value, 0)
 
-    // read trailing crlf
-    r.readline()
+	for i := 0; i < length; i++ {
+		val, err := r.read()
 
-    return v, nil
+		if err != nil {
+			return v, err
+		}
+
+		v.array = append(v.array, val)
+	}
+
+	return v, nil
 }
 
-// writer
+func (r *Resp) readbulk() (Value, error) {
+	v := Value{}
+	v.typ = "bulk"
+
+	length, _, err := r.readinteger()
+
+	if err != nil {
+		return v, err
+	}
+
+	bulk := make([]byte, length)
+
+	_, err = io.ReadFull(r.reader, bulk)
+	v.bulk = string(bulk)
+
+	// read trailing crlf
+	r.readline()
+
+	return v, nil
+}
+
+// WRITER
 
 type writer struct {
-    writer io.Writer
+	writer io.Writer
 }
 
 func NewWriter(w io.Writer) *writer {
-    return &writer{writer: w}
+	return &writer{writer: w}
 }
 
-func (w* writer) Write(val value) error {
-    var bytes = val.marshall()
-    
-    // calls io writer write
-    _, err = w.writer.Write(bytes)
+// main write dispatch command
+func (w *writer) write(val Value) error {
+	var bytes = val.marshall()
 
-    if err != nil {
-        return err
-    }
+	// calls io writer write
+	_, err := w.writer.Write(bytes)
 
-    return nil
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // marshall
+// the marshall converts values into RESP bytes
 
-func (val value) marshall() []byte {
-    switch val.typ {
-        case "array":
-            return val.marshallarray()
-        case "bulk":
-            return val.marshallbulk()
-        case "string":
-            return val.marshallstring()
-        case "null":
-            return val.marshallnull()
-        case "error":
-            return val.marshallerror()
-        default:
-            return []byte{}
-    }
+func (val Value) marshall() []byte {
+	switch val.typ {
+	case "array":
+		return val.marshallarray()
+	case "bulk":
+		return val.marshallbulk()
+	case "string":
+		return val.marshallstring()
+	case "null":
+		return val.marshallnull()
+	case "error":
+		return val.marshallerror()
+	default:
+		return []byte{}
+	}
 }
 
-func (val value) marshallstring() []byte {
-    var bytes []byte
+func (val Value) marshallstring() []byte {
+	var bytes []byte
 
-    bytes = append(bytes, string)
-    bytes = append(bytes, val.str...)
-    bytes = append(bytes, '\r', '\n')
+	bytes = append(bytes, RESPstring)
+	bytes = append(bytes, val.str...)
+	bytes = append(bytes, '\r', '\n')
 
-    return bytes
+	return bytes
 }
 
-func (val value) marshallbulk() []byte {
-    var bytes []byte
+func (val Value) marshallbulk() []byte {
+	var bytes []byte
 
-    bytes = append(bytes, bulk)
-    bytes = append(bytes, strconv.Itoa(len(val.bulk))...)
-    bytes = append(bytes, '\r', '\n')
-    bytes = append(bytes, val.bulk...)
-    bytes = append(bytes, '\r', '\n')
+	bytes = append(bytes, RESPbulk)
+	bytes = append(bytes, strconv.Itoa(len(val.bulk))...)
+	bytes = append(bytes, '\r', '\n')
+	bytes = append(bytes, val.bulk...)
+	bytes = append(bytes, '\r', '\n')
 
-    return bytes
+	return bytes
 }
 
-func (val value) marshallarray() []byte {
-    var bytes []byte
-    length := len(val.array)
+func (val Value) marshallarray() []byte {
+	var bytes []byte
+	length := len(val.array)
 
-    bytes = append(bytes, array)
-    bytes = append(bytes, strconv.Itoa(length)...)
-    bytes = append(bytes, '\r', '\n')
+	bytes = append(bytes, RESParray)
+	bytes = append(bytes, strconv.Itoa(length)...)
+	bytes = append(bytes, '\r', '\n')
 
-    for i := 0; i < length; i++ {
-        bytes = append(bytes, val.array[i].marshal()...)
-    }
+	for i := 0; i < length; i++ {
+		bytes = append(bytes, val.array[i].marshall()...)
+	}
 
-    return bytes
+	return bytes
 }
 
-func (val value) marshallerror() []byte {
-    var bytes []byte
-   
-    bytes = append(bytes, error)
-    bytes = append(bytes, val.str...)
-    bytes = append(bytes, '\r', '\n')
-    
-    return bytes
+func (val Value) marshallerror() []byte {
+	var bytes []byte
+
+	bytes = append(bytes, RESPerror)
+	bytes = append(bytes, val.str...)
+	bytes = append(bytes, '\r', '\n')
+
+	return bytes
 }
 
-func (val value) marshallnull() []byte {
-    var bytes []byte
+func (val Value) marshallnull() []byte {
+	var bytes []byte
 
-    bytes = append(bytes, "$-1\r\n"...)
+	bytes = append(bytes, "$-1\r\n"...)
 
-    return bytes
+	return bytes
 }
