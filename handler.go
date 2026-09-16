@@ -2,6 +2,7 @@ package main
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,16 +26,32 @@ func ping(args []Value) Value {
 var EXPIREs = make(map[string]time.Time)
 var EXPIREsMu sync.RWMutex
 
+// optional args for expire
+var ExpireFlags = map[string]func(string, int) Value{
+	"NX":      expireNX,
+	"XX":      expireXX,
+	"GT":      expireGT,
+	"LT":      expireLT,
+	"Default": expireDefault,
+}
+
 func expire(args []Value) Value {
-	if len(args) != 2 { // TODO: take care of additional args, e.g. XX
+	length := len(args)
+
+	if length < 2 || length > 3 {
 		return Value{
 			typ: "error",
-			str: "Wrong number of arguments for `expire` command, expected 2",
+			str: "Wrong number of arguments for `expire` command, expected 2-3",
 		}
 	}
 
 	key := args[0].bulk
 	secondsStr := args[1].bulk
+	flag := "Default"
+
+	if length == 3 {
+		flag = strings.ToUpper(args[2].bulk)
+	}
 
 	SETsMu.RLock()
 
@@ -49,6 +66,14 @@ func expire(args []Value) Value {
 		}
 	}
 
+	command, ok := ExpireFlags[flag]
+	if !ok {
+		return Value{
+			typ: "error",
+			str: "Invalid flag",
+		}
+	}
+
 	seconds, err := strconv.Atoi(secondsStr)
 	if err != nil {
 		return Value{
@@ -57,6 +82,101 @@ func expire(args []Value) Value {
 		}
 	}
 
+	if seconds <= 0 {
+		seconds = 0
+	}
+	
+	// TODO: fix race condition between above lock
+	// ideally, this whole section is protected by one database level lock
+	EXPIREsMu.RLock()
+
+	expTime, valid := EXPIREs[key]
+
+	EXPIREsMu.RUnlock()
+
+	if valid && !time.Now().Before(expTime) {
+		deleteKey(key)
+		deleteExpiry(key)
+		
+		return Value{typ: "number", num: 0}
+	}
+	return  command(key, seconds)
+}
+
+func expireNX(key string, seconds int) Value {
+	EXPIREsMu.Lock()
+	defer EXPIREsMu.Unlock()
+
+	_, ok := EXPIREs[key]
+
+	if !ok {
+		EXPIREs[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+
+		return Value{typ: "number", num: 1}
+	}
+
+	return Value{typ: "number", num: 0}
+}
+
+func expireXX(key string, seconds int) Value {
+	EXPIREsMu.Lock()
+	defer EXPIREsMu.Unlock()
+
+	_, ok := EXPIREs[key]
+
+	if ok {
+		EXPIREs[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+
+		return Value{typ: "number", num: 1}
+	}
+
+	return Value{typ: "number", num: 0}
+}
+
+func expireGT(key string, seconds int) Value {
+	EXPIREsMu.Lock()
+	defer EXPIREsMu.Unlock()
+
+	currExp, ok := EXPIREs[key]
+	newExp := time.Now().Add(time.Duration(seconds) * time.Second)
+
+	// a key with no expiry is treated to have an infinite expiry
+	// newExp < currExp
+	if !ok {
+		return Value{typ: "number", num: 0}
+	}
+
+	if newExp.After(currExp) {
+		EXPIREs[key] = newExp
+
+		return Value{typ: "number", num: 1}
+	}
+
+	return Value{typ: "number", num: 0}
+}
+
+func expireLT(key string, seconds int) Value {
+	EXPIREsMu.Lock()
+	defer EXPIREsMu.Unlock()
+
+	currExp, ok := EXPIREs[key]
+	newExp := time.Now().Add(time.Duration(seconds) * time.Second)
+
+	if !ok {
+		EXPIREs[key] = newExp
+		return Value{typ: "number", num: 1}
+	}
+
+	if newExp.Before(currExp) {
+		EXPIREs[key] = newExp
+
+		return Value{typ: "number", num: 1}
+	}
+
+	return Value{typ: "number", num: 0}
+}
+
+func expireDefault(key string, seconds int) Value {
 	EXPIREsMu.Lock()
 
 	EXPIREs[key] = time.Now().Add(time.Duration(seconds) * time.Second)
