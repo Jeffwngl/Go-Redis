@@ -16,10 +16,15 @@ var Handlers = map[string]func([]Value) Value{
 	"HGETALL": hgetall,
 	"TTL":     ttl,
 	"EXPIRE":  expire,
+	"COMMAND": command,
 }
 
 func ping(args []Value) Value {
 	return Value{typ: "string", str: "PONG"}
+}
+
+func command(args []Value) Value {
+	return Value{typ: "string", str: "Redis Loaded."}
 }
 
 // expiration map
@@ -61,7 +66,7 @@ func expire(args []Value) Value {
 		}
 	}
 
-	command, ok := ExpireFlags[flag]
+	action, ok := ExpireFlags[flag]
 	if !ok {
 		return Value{
 			typ: "error",
@@ -100,14 +105,14 @@ func expire(args []Value) Value {
 
 	newExpiry := time.Now().Add(time.Duration(seconds) * time.Second)
 
-	if !command(key, newExpiry) {
+	if !action(key, newExpiry) {
 		return Value{
 			typ: "number",
 			num: 0,
 		}
 	}
 
-	//	redis treats <= 0 as immediate expiry
+	// redis treats <= 0 as immediate expiry
 	if seconds <= 0 {
 		deleteKey(key)
 		deleteExpiry(key)
@@ -183,7 +188,7 @@ func ttl(args []Value) Value {
 	}
 
 	key := args[0].bulk
-	
+
 	// TODO: fix this race condition
 	EXPIREsMu.RLock()
 	SETsMu.RLock()
@@ -233,9 +238,6 @@ func deleteExpiry(key string) {
 
 // SET map
 var SETs = map[string]string{}
-
-// use RWMutex so that server can handle requests concurrently
-// so that SETs map is not modified by multiple threads at the same time
 var SETsMu = sync.RWMutex{}
 
 // handles: SET key value
