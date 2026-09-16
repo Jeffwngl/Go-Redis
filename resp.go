@@ -21,13 +21,12 @@ const (
 This is the internal representation when input is recieved in RESP form
 
 e.g.
-
 $4\r\nfoo\r\n
 
 becomes;
 
 	Value{
-	    typ:  "bulk",
+		typ:  "bulk",
 		bulk: "foo",
 	}
 */
@@ -187,6 +186,8 @@ func (val Value) marshall() []byte {
 		return val.marshallbulk()
 	case "string":
 		return val.marshallstring()
+	case "number":
+		return val.marshallnumber()
 	case "null":
 		return val.marshallnull()
 	case "error":
@@ -229,6 +230,16 @@ func (val Value) marshallarray() []byte {
 	for i := 0; i < length; i++ {
 		bytes = append(bytes, val.array[i].marshall()...)
 	}
+
+	return bytes
+}
+
+func (val Value) marshallnumber() []byte {
+	var bytes []byte
+
+	bytes = append(bytes, RESPinteger)
+	bytes = append(bytes, strconv.Itoa(val.num)...)
+	bytes = append(bytes, '\r', '\n')
 
 	return bytes
 }
