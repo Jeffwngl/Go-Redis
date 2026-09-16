@@ -1,7 +1,9 @@
 package main
 
 import (
+	"strconv"
 	"sync"
+	"time"
 )
 
 var Handlers = map[string]func([]Value) Value{
@@ -11,13 +13,116 @@ var Handlers = map[string]func([]Value) Value{
 	"HSET":    hset,
 	"HGET":    hget,
 	"HGETALL": hgetall,
+	"TTL":     ttl,
+	"EXPIRE":  expire,
 }
 
 func ping(args []Value) Value {
 	return Value{typ: "string", str: "PONG"}
 }
 
-// sets map
+// expiration map
+var EXPIREs = make(map[string]time.Time)
+var EXPIREsMu sync.RWMutex
+
+func expire(args []Value) Value {
+	if len(args) != 2 { // TODO: take care of additional args, e.g. XX
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for `expire` command, expected 2",
+		}
+	}
+
+	key := args[0].bulk
+	secondsStr := args[1].bulk
+
+	SETsMu.RLock()
+
+	_, ok := SETs[key] // TODO: fix for HSET and SETs so they reference the same key
+
+	SETsMu.RUnlock()
+
+	if !ok {
+		return Value{
+			typ: "number",
+			num: 0,
+		}
+	}
+
+	seconds, err := strconv.Atoi(secondsStr)
+	if err != nil {
+		return Value{
+			typ: "error",
+			str: "Invalid number",
+		}
+	}
+
+	EXPIREsMu.Lock()
+
+	EXPIREs[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+
+	EXPIREsMu.Unlock()
+
+	return Value{typ: "number", num: 1}
+}
+
+func ttl(args []Value) Value {
+	if len(args) != 1 {
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for `ttl` command, expected 1",
+		}
+	}
+
+	key := args[0].bulk
+
+	EXPIREsMu.RLock()
+	SETsMu.RLock()
+
+	expTime, valid := EXPIREs[key]
+	_, exists := SETs[key]
+
+	EXPIREsMu.RUnlock()
+	SETsMu.RUnlock()
+
+	if !exists {
+		return Value{
+			typ: "number",
+			num: -2,
+		}
+	}
+
+	if !valid {
+		return Value{
+			typ: "number",
+			num: -1,
+		}
+	}
+
+	timeLeft := int(time.Until(expTime).Seconds())
+
+	if timeLeft <= 0 {
+		deleteKey(key)
+		deleteExpiry(key)
+
+		return Value{
+			typ: "number",
+			num: -2,
+		}
+	}
+
+	return Value{typ: "number", num: timeLeft}
+}
+
+func deleteKey(key string) {
+	delete(SETs, key)
+}
+
+func deleteExpiry(key string) {
+	delete(EXPIREs, key)
+}
+
+// SET map
 var SETs = map[string]string{}
 
 // use RWMutex so that server can handle requests concurrently
@@ -33,7 +138,10 @@ args := []Value{
 */
 func set(args []Value) Value {
 	if len(args) != 2 {
-		return Value{typ: "error", str: "Wrong number of arguments for 'set' command, expected 2"}
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for 'set' command, expected 2",
+		}
 	}
 
 	key := args[0].bulk
@@ -49,7 +157,10 @@ func set(args []Value) Value {
 // handles: GET key
 func get(args []Value) Value {
 	if len(args) != 1 {
-		return Value{typ: "error", str: "Wrong number of arguments for 'get' command, expected 1"}
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for 'get' command, expected 1",
+		}
 	}
 
 	key := args[0].bulk
@@ -105,7 +216,7 @@ func hget(args []Value) Value {
 	HSETsMu.RUnlock()
 
 	if !ok {
-		return Value{typ: "error", str: "Error getting value from map"}
+		return Value{typ: "null"}
 	}
 
 	return Value{typ: "bulk", bulk: val}
