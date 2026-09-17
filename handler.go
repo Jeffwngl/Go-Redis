@@ -19,6 +19,20 @@ var Handlers = map[string]func([]Value) Value{
 	"COMMAND": command,
 }
 
+/*
+top level database
+*/
+type Database struct {
+	data    map[string]Value
+	expires map[string]time.Time
+	mu      sync.RWMutex
+}
+
+var DB Database
+
+// var DB = make(map[string]Value)
+// var DB.mu sync.RWMutex
+
 func ping(args []Value) Value {
 	return Value{typ: "string", str: "PONG"}
 }
@@ -28,10 +42,11 @@ func command(args []Value) Value {
 }
 
 // expiration map
-var EXPIREs = make(map[string]time.Time)
-var EXPIREsMu sync.RWMutex
+// redis stores expiration deadlines as absolute timestamps
+// var DB.expires = make(map[string]time.Time)
+// var DB.mu sync.RWMutex
 
-// optional args for expire
+// optional flags for expire
 var ExpireFlags = map[string]func(string, time.Time) bool{
 	"NX":      expireNX,
 	"XX":      expireXX,
@@ -74,11 +89,9 @@ func expire(args []Value) Value {
 		}
 	}
 
-	SETsMu.RLock()
-
-	_, ok = SETs[key] // TODO: fix for HSET and SETs so they reference the same key
-
-	SETsMu.RUnlock()
+	DB.mu.RLock()
+	_, ok = DB.data[key] // TODO: fix for HSET and DB so they reference the same key
+	DB.mu.RUnlock()
 
 	if !ok {
 		return Value{
@@ -89,9 +102,9 @@ func expire(args []Value) Value {
 
 	// TODO: fix race condition between above lock
 	// ideally, this whole section is protected by one database level lock
-	EXPIREsMu.RLock()
-	expTime, valid := EXPIREs[key]
-	EXPIREsMu.RUnlock()
+	DB.mu.RLock()
+	expTime, valid := DB.expires[key]
+	DB.mu.RUnlock()
 
 	if valid && !time.Now().Before(expTime) {
 		deleteKey(key)
@@ -123,9 +136,9 @@ func expire(args []Value) Value {
 		}
 	}
 
-	EXPIREsMu.Lock()
-	EXPIREs[key] = newExpiry
-	EXPIREsMu.Unlock()
+	DB.mu.Lock()
+	DB.expires[key] = newExpiry
+	DB.mu.Unlock()
 
 	return Value{
 		typ: "number",
@@ -134,25 +147,25 @@ func expire(args []Value) Value {
 }
 
 func expireNX(key string, newExpiry time.Time) bool {
-	EXPIREsMu.RLock()
-	_, hasExpiry := EXPIREs[key]
-	EXPIREsMu.RUnlock()
+	DB.mu.RLock()
+	_, hasExpiry := DB.expires[key]
+	DB.mu.RUnlock()
 
 	return !hasExpiry
 }
 
 func expireXX(key string, newExpiry time.Time) bool {
-	EXPIREsMu.RLock()
-	_, hasExpiry := EXPIREs[key]
-	EXPIREsMu.RUnlock()
+	DB.mu.RLock()
+	_, hasExpiry := DB.expires[key]
+	DB.mu.RUnlock()
 
 	return hasExpiry
 }
 
 func expireGT(key string, newExpiry time.Time) bool {
-	EXPIREsMu.RLock()
-	currExpiry, hasExpiry := EXPIREs[key]
-	EXPIREsMu.RUnlock()
+	DB.mu.RLock()
+	currExpiry, hasExpiry := DB.expires[key]
+	DB.mu.RUnlock()
 
 	if !hasExpiry {
 		return false
@@ -162,9 +175,9 @@ func expireGT(key string, newExpiry time.Time) bool {
 }
 
 func expireLT(key string, newExpiry time.Time) bool {
-	EXPIREsMu.RLock()
-	currExpiry, hasExpiry := EXPIREs[key]
-	EXPIREsMu.RUnlock()
+	DB.mu.RLock()
+	currExpiry, hasExpiry := DB.expires[key]
+	DB.mu.RUnlock()
 
 	// no expiry is treated as infinity
 	// so finite expiry is less than it
@@ -189,15 +202,10 @@ func ttl(args []Value) Value {
 
 	key := args[0].bulk
 
-	// TODO: fix this race condition
-	EXPIREsMu.RLock()
-	SETsMu.RLock()
-
-	expTime, valid := EXPIREs[key]
-	_, exists := SETs[key]
-
-	EXPIREsMu.RUnlock()
-	SETsMu.RUnlock()
+	DB.mu.RLock()
+	expTime, valid := DB.expires[key]
+	_, exists := DB.data[key]
+	DB.mu.RUnlock()
 
 	if !exists {
 		return Value{
@@ -215,6 +223,12 @@ func ttl(args []Value) Value {
 
 	timeLeft := int(time.Until(expTime).Seconds())
 
+	/*
+		redis stores expiration metadata separately from the main dictionary,
+		expired keys are removed either lazily or actively in background expiration
+		cycles, redis 6 improved active expiration by using a radix tree containing
+		keys likely to expire soon.
+	*/
 	if timeLeft <= 0 {
 		deleteKey(key)
 		deleteExpiry(key)
@@ -229,16 +243,12 @@ func ttl(args []Value) Value {
 }
 
 func deleteKey(key string) {
-	delete(SETs, key)
+	delete(DB.data, key)
 }
 
 func deleteExpiry(key string) {
-	delete(EXPIREs, key)
+	delete(DB.expires, key)
 }
-
-// SET map
-var SETs = map[string]string{}
-var SETsMu = sync.RWMutex{}
 
 // handles: SET key value
 /*
@@ -258,11 +268,17 @@ func set(args []Value) Value {
 	key := args[0].bulk
 	val := args[1].bulk
 
-	SETsMu.Lock()
-	SETs[key] = val
-	SETsMu.Unlock()
+	DB.mu.Lock()
+	DB.data[key] = Value{
+		typ: "string",
+		str: val,
+	}
+	DB.mu.Unlock()
 
-	return Value{typ: "string", str: "OK"}
+	return Value{
+		typ: "string",
+		str: "OK",
+	}
 }
 
 // handles: GET key
@@ -276,61 +292,99 @@ func get(args []Value) Value {
 
 	key := args[0].bulk
 
-	SETsMu.RLock()
-	val, ok := SETs[key]
-	SETsMu.RUnlock()
+	DB.mu.RLock()
+	val, ok := DB.data[key]
+	DB.mu.RUnlock()
 
 	if !ok {
 		return Value{typ: "null"}
 	}
 
-	return Value{typ: "bulk", bulk: val}
-}
+	if val.typ == "hash" {
+		return Value{
+			typ: "error",
+			str: "WRONGTYPE, hash cannot be used as key.",
+		}
+	}
 
-var HSETs = map[string]map[string]string{}
-var HSETsMu = sync.RWMutex{}
+	return Value{typ: "bulk", bulk: val.bulk}
+}
 
 func hset(args []Value) Value {
 	if len(args) != 3 {
-		return Value{typ: "error", str: "Wrong number of arguments for 'hset' command, expected 3"}
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for 'hset' command, expected 3",
+		}
 	}
 
 	hash := args[0].bulk
 	key := args[1].bulk
 	val := args[2].bulk
 
-	HSETsMu.Lock()
-
-	_, ok := HSETs[hash]
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
+	hashVal, ok := DB.data[hash]
 
 	if !ok {
-		HSETs[hash] = map[string]string{}
+		DB.data[hash] = Value{
+			typ:  "hash",
+			hash: map[string]string{},
+		}
 	}
 
-	HSETs[hash][key] = val
+	if hashVal.typ == "string" {
+		return Value{
+			typ: "error",
+			str: "WRONGTYPE, hash cannot be the same as key.",
+		}
+	}
 
-	HSETsMu.Unlock()
+	DB.data[hash].hash[key] = val
 
-	return Value{typ: "string", str: "OK"}
+	return Value{
+		typ: "string",
+		str: "OK",
+	}
 }
 
 func hget(args []Value) Value {
 	if len(args) != 2 {
-		return Value{typ: "error", str: "Wrong number of arguments for 'hget' command, expected 2"}
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for 'hget' command, expected 2",
+		}
 	}
 
 	hash := args[0].bulk
 	key := args[1].bulk
 
-	HSETsMu.RLock()
-	val, ok := HSETs[hash][key]
-	HSETsMu.RUnlock()
+	DB.mu.RLock()
+	defer DB.mu.RUnlock()
+
+	hashVal, ok := DB.data[hash]
 
 	if !ok {
 		return Value{typ: "null"}
 	}
 
-	return Value{typ: "bulk", bulk: val}
+	if hashVal.typ == "string" {
+		return Value{
+			typ: "error",
+			str: "WRONGTYPE, hash cannot be the same as key.",
+		}
+	}
+
+	val, ok := DB.data[hash].hash[key]
+
+	if !ok {
+		return Value{typ: "null"}
+	}
+
+	return Value{
+		typ:  "bulk",
+		bulk: val,
+	}
 }
 
 func hgetall(args []Value) Value {
@@ -342,7 +396,10 @@ func hgetall(args []Value) Value {
 
 	hash := args[0].bulk
 
-	for key, val := range HSETs[hash] {
+	DB.mu.RLock()
+	defer DB.mu.RUnlock()
+
+	for key, val := range DB.data[hash].hash {
 		res = append(
 			res,
 			Value{typ: "bulk", bulk: key},
