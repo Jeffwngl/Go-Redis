@@ -20,7 +20,8 @@ var Handlers = map[string]func([]Value) Value{
 }
 
 /*
-top level database
+TOP LEVEL DATABASE
+redis stores expiration deadlines as absolute timestamps
 */
 type Database struct {
 	data    map[string]Value
@@ -30,9 +31,6 @@ type Database struct {
 
 var DB Database
 
-// var DB = make(map[string]Value)
-// var DB.mu sync.RWMutex
-
 func ping(args []Value) Value {
 	return Value{typ: "string", str: "PONG"}
 }
@@ -40,11 +38,6 @@ func ping(args []Value) Value {
 func command(args []Value) Value {
 	return Value{typ: "string", str: "Redis Loaded."}
 }
-
-// expiration map
-// redis stores expiration deadlines as absolute timestamps
-// var DB.expires = make(map[string]time.Time)
-// var DB.mu sync.RWMutex
 
 // optional flags for expire
 var ExpireFlags = map[string]func(string, time.Time) bool{
@@ -90,7 +83,8 @@ func expire(args []Value) Value {
 	}
 
 	DB.mu.RLock()
-	_, ok = DB.data[key] // TODO: fix for HSET and DB so they reference the same key
+	expTime, valid := DB.expires[key]
+	_, ok = DB.data[key]
 	DB.mu.RUnlock()
 
 	if !ok {
@@ -100,13 +94,7 @@ func expire(args []Value) Value {
 		}
 	}
 
-	// TODO: fix race condition between above lock
-	// ideally, this whole section is protected by one database level lock
-	DB.mu.RLock()
-	expTime, valid := DB.expires[key]
-	DB.mu.RUnlock()
-
-	if valid && !time.Now().Before(expTime) {
+	if valid && time.Now().After(expTime) {
 		deleteKey(key)
 		deleteExpiry(key)
 
@@ -242,6 +230,7 @@ func ttl(args []Value) Value {
 	return Value{typ: "number", num: timeLeft}
 }
 
+// used only inside a database lock
 func deleteKey(key string) {
 	delete(DB.data, key)
 }
@@ -266,12 +255,28 @@ func set(args []Value) Value {
 	}
 
 	key := args[0].bulk
-	val := args[1].bulk
+	newVal := args[1].bulk
+
+	DB.mu.RLock()
+	val, ok := DB.data[key]
+	_, expireExists := DB.expires[key]
+	DB.mu.RUnlock()
+
+	if !ok && val.typ != "string" {
+		return Value{
+			typ: "error",
+			str: "WRONGTYPE, key doesn't exist as string.",
+		}
+	}
 
 	DB.mu.Lock()
-	DB.data[key] = Value{
+	val = Value{
 		typ: "string",
-		str: val,
+		str: newVal,
+	}
+
+	if expireExists {
+		deleteExpiry(key)
 	}
 	DB.mu.Unlock()
 
@@ -292,9 +297,10 @@ func get(args []Value) Value {
 
 	key := args[0].bulk
 
-	DB.mu.RLock()
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
+
 	val, ok := DB.data[key]
-	DB.mu.RUnlock()
 
 	if !ok {
 		return Value{typ: "null"}
@@ -305,6 +311,15 @@ func get(args []Value) Value {
 			typ: "error",
 			str: "WRONGTYPE, hash cannot be used as key.",
 		}
+	}
+
+	expTime, ok := DB.expires[key]
+
+	if ok && time.Now().After(expTime) {
+		deleteKey(key)
+		deleteExpiry(key)
+
+		return Value{typ: "null"}
 	}
 
 	return Value{typ: "bulk", bulk: val.bulk}
@@ -327,20 +342,20 @@ func hset(args []Value) Value {
 	hashVal, ok := DB.data[hash]
 
 	if !ok {
-		DB.data[hash] = Value{
+		hashVal = Value{
 			typ:  "hash",
 			hash: map[string]string{},
 		}
 	}
 
-	if hashVal.typ == "string" {
+	if hashVal.typ != "hash" {
 		return Value{
 			typ: "error",
 			str: "WRONGTYPE, hash cannot be the same as key.",
 		}
 	}
 
-	DB.data[hash].hash[key] = val
+	hashVal.hash[key] = val
 
 	return Value{
 		typ: "string",
@@ -359,8 +374,8 @@ func hget(args []Value) Value {
 	hash := args[0].bulk
 	key := args[1].bulk
 
-	DB.mu.RLock()
-	defer DB.mu.RUnlock()
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
 
 	hashVal, ok := DB.data[hash]
 
@@ -368,14 +383,23 @@ func hget(args []Value) Value {
 		return Value{typ: "null"}
 	}
 
-	if hashVal.typ == "string" {
+	expTime, ok := DB.expires[hash]
+
+	if ok && time.Now().After(expTime) {
+		deleteKey(hash)
+		deleteExpiry(hash)
+
+		return Value{typ: "null"}
+	}
+
+	if hashVal.typ != "hash" {
 		return Value{
 			typ: "error",
 			str: "WRONGTYPE, hash cannot be the same as key.",
 		}
 	}
 
-	val, ok := DB.data[hash].hash[key]
+	val, ok := hashVal.hash[key]
 
 	if !ok {
 		return Value{typ: "null"}
@@ -389,17 +413,42 @@ func hget(args []Value) Value {
 
 func hgetall(args []Value) Value {
 	if len(args) != 1 {
-		return Value{typ: "error", str: "Wrong number of arguments for 'hgetall' command, expected 1"}
+		return Value{
+			typ: "error",
+			str: "Wrong number of arguments for 'hgetall' command, expected 1",
+		}
 	}
 
 	res := []Value{}
 
 	hash := args[0].bulk
 
-	DB.mu.RLock()
-	defer DB.mu.RUnlock()
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
 
-	for key, val := range DB.data[hash].hash {
+	hashVal, ok := DB.data[hash]
+
+	if !ok {
+		return Value{typ: "null"}
+	}
+
+	expTime, ok := DB.expires[hash]
+
+	if ok && time.Now().After(expTime) {
+		deleteKey(hash)
+		deleteExpiry(hash)
+
+		return Value{typ: "null"}
+	}
+
+	if hashVal.typ != "hash" {
+		return Value{
+			typ: "error",
+			str: "WRONGTYPE, hash cannot be the same as key.",
+		}
+	}
+
+	for key, val := range hashVal.hash {
 		res = append(
 			res,
 			Value{typ: "bulk", bulk: key},
