@@ -297,32 +297,20 @@ func get(args []Value) Value {
 
 	key := args[0].bulk
 
-	DB.mu.Lock()
-	defer DB.mu.Unlock()
-
-	val, ok := DB.data[key]
+	val, ok := getLiveKey(key)
 
 	if !ok {
 		return Value{typ: "null"}
 	}
 
-	if val.typ == "hash" {
+	if val.typ != "string" {
 		return Value{
 			typ: "error",
 			str: "WRONGTYPE, hash cannot be used as key.",
 		}
 	}
 
-	expTime, ok := DB.expires[key]
-
-	if ok && time.Now().After(expTime) {
-		deleteKey(key)
-		deleteExpiry(key)
-
-		return Value{typ: "null"}
-	}
-
-	return Value{typ: "bulk", bulk: val.bulk}
+	return Value{typ: "bulk", bulk: val.str}
 }
 
 func hset(args []Value) Value {
@@ -374,21 +362,9 @@ func hget(args []Value) Value {
 	hash := args[0].bulk
 	key := args[1].bulk
 
-	DB.mu.Lock()
-	defer DB.mu.Unlock()
-
-	hashVal, ok := DB.data[hash]
+	hashVal, ok := getLiveKey(hash)
 
 	if !ok {
-		return Value{typ: "null"}
-	}
-
-	expTime, ok := DB.expires[hash]
-
-	if ok && time.Now().After(expTime) {
-		deleteKey(hash)
-		deleteExpiry(hash)
-
 		return Value{typ: "null"}
 	}
 
@@ -423,21 +399,9 @@ func hgetall(args []Value) Value {
 
 	hash := args[0].bulk
 
-	DB.mu.Lock()
-	defer DB.mu.Unlock()
-
-	hashVal, ok := DB.data[hash]
+	hashVal, ok := getLiveKey(hash)
 
 	if !ok {
-		return Value{typ: "null"}
-	}
-
-	expTime, ok := DB.expires[hash]
-
-	if ok && time.Now().After(expTime) {
-		deleteKey(hash)
-		deleteExpiry(hash)
-
 		return Value{typ: "null"}
 	}
 
@@ -457,4 +421,26 @@ func hgetall(args []Value) Value {
 	}
 
 	return Value{typ: "array", array: res}
+}
+
+func getLiveKey(key string) (Value, bool) {
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
+
+	val, ok := DB.data[key]
+
+	if !ok {
+		return Value{typ: "null"}, false
+	}
+
+	expTime, ok := DB.expires[key]
+
+	if ok && !time.Now().Before(expTime) {
+		deleteKey(key)
+		deleteExpiry(key)
+
+		return Value{typ: "null"}, false
+	}
+
+	return val, true
 }
