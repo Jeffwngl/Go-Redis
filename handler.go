@@ -307,6 +307,13 @@ func hset(args []Value) Value {
 	DB.mu.Lock()
 	defer DB.mu.Unlock()
 
+	if expTime, hasExpiry := DB.expires[hash]; hasExpiry {
+		if !time.Now().Before(expTime) {
+			deleteKey(hash)
+			deleteExpiry(hash)
+		}
+	}
+
 	hashVal, ok := DB.data[hash]
 
 	if !ok {
@@ -325,7 +332,7 @@ func hset(args []Value) Value {
 
 	hashVal.hash[key] = val
 	DB.data[hash] = hashVal
-
+	// TODO: distinguish between overwriting and creating new key
 	return Value{
 		typ: "number",
 		num: 1,
@@ -343,7 +350,7 @@ func hget(args []Value) Value {
 	hash := args[0].bulk
 	key := args[1].bulk
 
-	hashVal, ok := getLiveKey(hash)
+	hashVal, ok := getLiveKeyLocked(hash)
 
 	if !ok {
 		return Value{typ: "null"}
@@ -380,7 +387,7 @@ func hgetall(args []Value) Value {
 
 	hash := args[0].bulk
 
-	hashVal, ok := getLiveKey(hash)
+	hashVal, ok := getLiveKeyLocked(hash)
 
 	if !ok {
 		return Value{typ: "array", array: []Value{}}
@@ -404,23 +411,27 @@ func hgetall(args []Value) Value {
 	return Value{typ: "array", array: res}
 }
 
+// expects caller to have no lock
 func getLiveKey(key string) (Value, bool) {
 	DB.mu.Lock()
 	defer DB.mu.Unlock()
 
-	val, ok := DB.data[key]
+	return getLiveKeyLocked(key)
+}
 
+// expects caller to be locked
+func getLiveKeyLocked(key string) (Value, bool) {
+	val, ok := DB.data[key]
 	if !ok {
-		return Value{typ: "null"}, false
+		return Value{}, false
 	}
 
-	expTime, ok := DB.expires[key]
+	expTime, hasExpiry := DB.expires[key]
 
-	if ok && !time.Now().Before(expTime) {
+	if hasExpiry && !time.Now().Before(expTime) {
 		deleteKey(key)
 		deleteExpiry(key)
-
-		return Value{typ: "null"}, false
+		return Value{}, false
 	}
 
 	return val, true
