@@ -330,9 +330,18 @@ func hset(args []Value) Value {
 		}
 	}
 
+	_, fieldExists := hashVal.hash[key]
+
 	hashVal.hash[key] = val
 	DB.data[hash] = hashVal
-	// TODO: distinguish between overwriting and creating new key
+
+	if fieldExists {
+		return Value{
+			typ: "number",
+			num: 0,
+		}
+	}
+
 	return Value{
 		typ: "number",
 		num: 1,
