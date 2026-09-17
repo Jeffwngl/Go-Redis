@@ -29,7 +29,10 @@ type Database struct {
 	mu      sync.RWMutex
 }
 
-var DB Database
+var DB = Database{
+	data:    make(map[string]Value),
+	expires: make(map[string]time.Time),
+}
 
 func ping(args []Value) Value {
 	return Value{typ: "string", str: "PONG"}
@@ -82,10 +85,11 @@ func expire(args []Value) Value {
 		}
 	}
 
-	DB.mu.RLock()
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
+
 	expTime, valid := DB.expires[key]
 	_, ok = DB.data[key]
-	DB.mu.RUnlock()
 
 	if !ok {
 		return Value{
@@ -94,7 +98,7 @@ func expire(args []Value) Value {
 		}
 	}
 
-	if valid && time.Now().After(expTime) {
+	if valid && !time.Now().Before(expTime) {
 		deleteKey(key)
 		deleteExpiry(key)
 
@@ -124,9 +128,7 @@ func expire(args []Value) Value {
 		}
 	}
 
-	DB.mu.Lock()
 	DB.expires[key] = newExpiry
-	DB.mu.Unlock()
 
 	return Value{
 		typ: "number",
@@ -135,25 +137,19 @@ func expire(args []Value) Value {
 }
 
 func expireNX(key string, newExpiry time.Time) bool {
-	DB.mu.RLock()
 	_, hasExpiry := DB.expires[key]
-	DB.mu.RUnlock()
 
 	return !hasExpiry
 }
 
 func expireXX(key string, newExpiry time.Time) bool {
-	DB.mu.RLock()
 	_, hasExpiry := DB.expires[key]
-	DB.mu.RUnlock()
 
 	return hasExpiry
 }
 
 func expireGT(key string, newExpiry time.Time) bool {
-	DB.mu.RLock()
 	currExpiry, hasExpiry := DB.expires[key]
-	DB.mu.RUnlock()
 
 	if !hasExpiry {
 		return false
@@ -163,9 +159,7 @@ func expireGT(key string, newExpiry time.Time) bool {
 }
 
 func expireLT(key string, newExpiry time.Time) bool {
-	DB.mu.RLock()
 	currExpiry, hasExpiry := DB.expires[key]
-	DB.mu.RUnlock()
 
 	// no expiry is treated as infinity
 	// so finite expiry is less than it
@@ -190,10 +184,11 @@ func ttl(args []Value) Value {
 
 	key := args[0].bulk
 
-	DB.mu.RLock()
+	DB.mu.Lock()
+	defer DB.mu.Unlock()
+
 	expTime, valid := DB.expires[key]
 	_, exists := DB.data[key]
-	DB.mu.RUnlock()
 
 	if !exists {
 		return Value{
@@ -209,23 +204,20 @@ func ttl(args []Value) Value {
 		}
 	}
 
-	timeLeft := int(time.Until(expTime).Seconds())
-
 	/*
 		redis stores expiration metadata separately from the main dictionary,
 		expired keys are removed either lazily or actively in background expiration
 		cycles, redis 6 improved active expiration by using a radix tree containing
 		keys likely to expire soon.
 	*/
-	if timeLeft <= 0 {
+	if !time.Now().Before(expTime) {
 		deleteKey(key)
 		deleteExpiry(key)
 
-		return Value{
-			typ: "number",
-			num: -2,
-		}
+		return Value{typ: "number", num: -2}
 	}
+
+	timeLeft := int(time.Until(expTime).Seconds())
 
 	return Value{typ: "number", num: timeLeft}
 }
@@ -257,28 +249,15 @@ func set(args []Value) Value {
 	key := args[0].bulk
 	newVal := args[1].bulk
 
-	DB.mu.RLock()
-	val, ok := DB.data[key]
-	_, expireExists := DB.expires[key]
-	DB.mu.RUnlock()
-
-	if !ok && val.typ != "string" {
-		return Value{
-			typ: "error",
-			str: "WRONGTYPE, key doesn't exist as string.",
-		}
-	}
-
 	DB.mu.Lock()
-	val = Value{
+	defer DB.mu.Unlock()
+
+	DB.data[key] = Value{
 		typ: "string",
 		str: newVal,
 	}
 
-	if expireExists {
-		deleteExpiry(key)
-	}
-	DB.mu.Unlock()
+	deleteExpiry(key)
 
 	return Value{
 		typ: "string",
@@ -327,27 +306,29 @@ func hset(args []Value) Value {
 
 	DB.mu.Lock()
 	defer DB.mu.Unlock()
+
 	hashVal, ok := DB.data[hash]
 
 	if !ok {
 		hashVal = Value{
 			typ:  "hash",
-			hash: map[string]string{},
+			hash: make(map[string]string),
 		}
 	}
 
 	if hashVal.typ != "hash" {
 		return Value{
 			typ: "error",
-			str: "WRONGTYPE, hash cannot be the same as key.",
+			str: "WRONGTYPE Operation against a key holding the wrong kind of value",
 		}
 	}
 
 	hashVal.hash[key] = val
+	DB.data[hash] = hashVal
 
 	return Value{
-		typ: "string",
-		str: "OK",
+		typ: "number",
+		num: 1,
 	}
 }
 
@@ -402,7 +383,7 @@ func hgetall(args []Value) Value {
 	hashVal, ok := getLiveKey(hash)
 
 	if !ok {
-		return Value{typ: "null"}
+		return Value{typ: "array", array: []Value{}}
 	}
 
 	if hashVal.typ != "hash" {
