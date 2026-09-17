@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strings"
 )
@@ -14,13 +15,20 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer l.Close()
 
-	conn, err := l.Accept()
-	if err != nil {
-		fmt.Println(err)
-		return
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Accept error:", err)
+			continue
+		}
+
+		go handleConnection(conn)
 	}
+}
 
+func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	resp := NewResp(conn)
@@ -30,6 +38,11 @@ func main() {
 		val, err := resp.read()
 
 		if err != nil {
+			if err == io.EOF {
+				fmt.Println("Client disconnected.")
+				return
+			}
+
 			fmt.Println(err)
 			return
 		}
@@ -51,13 +64,25 @@ func main() {
 
 		if !ok {
 			fmt.Println("Invalid command")
-			writer.write(Value{typ: "string", str: ""})
+
+			err := writer.write(Value{
+				typ: "error",
+				str: "ERR unknown command",
+			})
+
+			if err != nil {
+				fmt.Println("Write error:", err)
+				return
+			}
+
 			continue
 		}
 
-		// fmt.Println(val)
-
 		result := handler(args)
-		writer.write(result)
+
+		if err := writer.write(result); err != nil {
+			fmt.Println("Write error:", err)
+			return
+		}
 	}
 }
