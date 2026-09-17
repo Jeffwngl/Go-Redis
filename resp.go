@@ -9,6 +9,12 @@ import (
 
 // READER
 
+/*
+RESP type prefix bytes.
+
+Redis Serialization Protocol (RESP) uses the first byte of each value
+to identify the type of data that follows.
+*/
 const (
 	RESPstring  = '+'
 	RESPerror   = '-'
@@ -20,8 +26,12 @@ const (
 /*
 This is the internal representation when input is recieved in RESP form
 
-e.g.
-$4\r\nfoo\r\n
+Instead of keeping RESP values as raw bytes, incoming data is parsed
+into this structure so command handlers can work with normal Go values.
+
+For example, the RESP bulk string;
+
+	$4\r\nfoo\r\n
 
 becomes;
 
@@ -29,6 +39,14 @@ becomes;
 		typ:  "bulk",
 		bulk: "foo",
 	}
+
+Different fields are used depending on the RESP value type;
+
+- str   stores simple strings and errors
+- num   stores RESP integers
+- bulk  stores bulk strings
+- array stores nested RESP values
+- hash  stores Redis hash data used internally by the database
 */
 type Value struct {
 	typ   string
@@ -36,6 +54,7 @@ type Value struct {
 	num   int
 	bulk  string
 	array []Value
+	hash  map[string]string
 }
 
 type Resp struct {
@@ -85,8 +104,10 @@ func (r *Resp) readinteger() (x int, y int, err error) {
 	return int(i64), n, nil
 }
 
-// central dispatcher read command
-// reads first byte to determine the type of the following value
+/*
+read() reads a single RESP value from the input stream.
+RESP values begin with a one-byte prefix describing their type.
+*/
 func (r *Resp) read() (Value, error) {
 	_type, err := r.reader.ReadByte()
 
@@ -153,6 +174,10 @@ func (r *Resp) readbulk() (Value, error) {
 
 // WRITER
 
+/*
+Values are first converted from the server's internal Value representation
+into RESP bytes before being written to the client.
+*/
 type writer struct {
 	writer io.Writer
 }
@@ -161,11 +186,14 @@ func NewWriter(w io.Writer) *writer {
 	return &writer{writer: w}
 }
 
-// main write dispatch command
+/*
+write serializes a Value into RESP format and sends it to the client.
+The Value itself does not contain raw RESP bytes. Instead, marshall()
+determines the appropriate encoding according to val.typ.
+*/
 func (w *writer) write(val Value) error {
 	var bytes = val.marshall()
 
-	// calls io writer write
 	_, err := w.writer.Write(bytes)
 
 	if err != nil {
@@ -174,9 +202,6 @@ func (w *writer) write(val Value) error {
 
 	return nil
 }
-
-// marshall
-// the marshall converts values into RESP bytes
 
 func (val Value) marshall() []byte {
 	switch val.typ {

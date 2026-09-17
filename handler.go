@@ -21,7 +21,15 @@ var Handlers = map[string]func([]Value) Value{
 
 /*
 TOP LEVEL DATABASE
-redis stores expiration deadlines as absolute timestamps
+
+The database stores all Redis keys in a single map regardless of
+their underlying type.
+
+Redis stores expiration deadlines as absolute timestamps and are stored
+separately from the rest of the data
+
+RWMutex protects both maps so operations involving a value and
+its expiration metadata can be performed atomically.
 */
 type Database struct {
 	data    map[string]Value
@@ -42,7 +50,10 @@ func command(args []Value) Value {
 	return Value{typ: "string", str: "Redis Loaded."}
 }
 
-// optional flags for expire
+/*
+EXPIRE can optionally modify a key's expiry only when a particular
+condition is satisfied.
+*/
 var ExpireFlags = map[string]func(string, time.Time) bool{
 	"NX":      expireNX,
 	"XX":      expireXX,
@@ -51,6 +62,11 @@ var ExpireFlags = map[string]func(string, time.Time) bool{
 	"Default": expireDefault,
 }
 
+/*
+EXPIRE key seconds [NX|XX|GT|LT]
+Adds or updates the expiration time associated with a Redis key.
+Expiry is stored as an absolute timestamp
+*/
 func expire(args []Value) Value {
 	length := len(args)
 
@@ -174,6 +190,11 @@ func expireDefault(key string, newExpiry time.Time) bool {
 	return true
 }
 
+/*
+TTL key
+Returns the remaining lifetime of a key in whole seconds.
+TTL also performs lazy expiration.
+*/
 func ttl(args []Value) Value {
 	if len(args) != 1 {
 		return Value{
@@ -222,21 +243,19 @@ func ttl(args []Value) Value {
 	return Value{typ: "number", num: timeLeft}
 }
 
-// used only inside a database lock
+// expects to be run inside a lock
 func deleteKey(key string) {
 	delete(DB.data, key)
 }
 
+// expects to be run inside a lock
 func deleteExpiry(key string) {
 	delete(DB.expires, key)
 }
 
-// handles: SET key value
 /*
-args := []Value{
-    {typ: "bulk", bulk: "key"},
-    {typ: "bulk", bulk: "value"},
-}
+SET key value
+Stores a string value under the supplied Redis key.
 */
 func set(args []Value) Value {
 	if len(args) != 2 {
@@ -265,7 +284,10 @@ func set(args []Value) Value {
 	}
 }
 
-// handles: GET key
+/*
+GET key
+Retrieves a string value from the database.
+*/
 func get(args []Value) Value {
 	if len(args) != 1 {
 		return Value{
@@ -292,6 +314,10 @@ func get(args []Value) Value {
 	return Value{typ: "bulk", bulk: val.str}
 }
 
+/*
+HSET hash field value
+Stores a field-value pair inside a Redis hash.
+*/
 func hset(args []Value) Value {
 	if len(args) != 3 {
 		return Value{
@@ -420,7 +446,10 @@ func hgetall(args []Value) Value {
 	return Value{typ: "array", array: res}
 }
 
-// expects caller to have no lock
+/*
+getLiveKey retrieves a key while also enforcing lazy expiration.
+This is the safe public helper for callers that do NOT already hold DB.mu.
+*/
 func getLiveKey(key string) (Value, bool) {
 	DB.mu.Lock()
 	defer DB.mu.Unlock()
@@ -428,7 +457,11 @@ func getLiveKey(key string) (Value, bool) {
 	return getLiveKeyLocked(key)
 }
 
-// expects caller to be locked
+/*
+getLiveKeyLocked performs a database lookup and removes expired keys.
+IMPORTANT:
+The caller must already hold DB.mu before calling this function.
+*/
 func getLiveKeyLocked(key string) (Value, bool) {
 	val, ok := DB.data[key]
 	if !ok {
